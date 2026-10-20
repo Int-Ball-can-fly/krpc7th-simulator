@@ -31,6 +31,7 @@ COMPOSE_FILE = ROOT / "docker-compose.yaml"
 MAX_UPLOAD_BYTES = max(1, int(os.environ.get("SIM_UPLOAD_MAX_MB", "512"))) * 1024 * 1024
 MAX_ARCHIVE_BYTES = max(1, int(os.environ.get("SIM_ARCHIVE_MAX_MB", "2048"))) * 1024 * 1024
 DEFAULT_CONCURRENCY = max(1, int(os.environ.get("SIM_MAX_CONCURRENT", "2")))
+SIMULATION_EXECUTION_TIME = os.environ.get("SIM_EXECUTION_TIME", "30m")
 RETENTION_DAYS = max(0, int(os.environ.get("SIM_RETENTION_DAYS", "30")))
 CLEANUP_INTERVAL_HOURS = max(0, int(os.environ.get("SIM_CLEANUP_INTERVAL_HOURS", "24")))
 LOG_THRESHOLD_GB = max(0, float(os.environ["SIM_LOG_THRESHOLD_GB"])) if "SIM_LOG_THRESHOLD_GB" in os.environ else None
@@ -272,6 +273,7 @@ class SimulationManager:
             "SIM_SHARE_DIR": str(job_dir / "share"),
             "SIM_USERS_DIR": str(job_dir / "users"),
             "SIM_SHM_DIR": str(job_dir / "shm"),
+            "execution_time": SIMULATION_EXECUTION_TIME,
         })
         return command, env
 
@@ -784,7 +786,10 @@ async def simulation_score(request: web.Request) -> web.Response:
             level = 0
         return point_values.get(level, 0)
 
-    points = sum(checkpoint_points(item) for item in checkpoints)
+    level_points = sum(checkpoint_points(item) for item in checkpoints)
+    goal = ((result or {}).get("JudgeReport", {}).get("goal", {}))
+    goal_points = 30 if isinstance(goal, dict) and goal.get("success") is True else 0
+    points = level_points + goal_points
     failed_checkpoint = any(isinstance(item, dict) and item.get("success") is False for item in checkpoints)
     all_lv3 = bool(checkpoints) and all(
         isinstance(item, dict) and item.get("success") is True and item.get("level") == 3
@@ -792,6 +797,8 @@ async def simulation_score(request: web.Request) -> web.Response:
     )
     multiplier = 1 + (mission_remain_seconds / MISSION_TIME_LIMIT_SECONDS) if mission_remain_seconds is not None else None
     score_summary = {
+        "level_points": level_points,
+        "goal_points": goal_points,
         "points": points,
         "multiplier": multiplier,
         "final_score": points * multiplier if multiplier is not None else None,
@@ -1265,7 +1272,9 @@ INDEX_HTML = r"""<!doctype html>
     const checkpoints = Array.isArray(report.checkpoint_detail) ? report.checkpoint_detail : [];
     const remainText = missionRemainSeconds == null ? (mission.started && !mission.finished ? 'In progress' : '—') : `${Number(missionRemainSeconds).toFixed(2)} sec`;
     node.innerHTML = `<div class="score-grid">
-      <div class="score-card"><span class="muted">Points</span><span class="score-value">${summary ? esc(summary.points) : '—'}</span></div>
+      <div class="score-card"><span class="muted">Level Points</span><span class="score-value">${summary ? esc(summary.level_points) : '—'}</span></div>
+      <div class="score-card"><span class="muted">Goal Points</span><span class="score-value">${summary ? esc(summary.goal_points) : '—'}</span></div>
+      <div class="score-card"><span class="muted">Total Points</span><span class="score-value">${summary ? esc(summary.points) : '—'}</span></div>
       <div class="score-card"><span class="muted">Time Multiplier (mg)</span><span class="score-value">${summary?.multiplier == null ? '—' : `${Number(summary.multiplier).toFixed(3)}×`}</span></div>
       <div class="score-card"><span class="muted">Final Score (points × mg)</span><span class="score-value">${summary?.final_score == null ? '—' : Number(summary.final_score).toFixed(2)}</span></div>
       <div class="score-card"><span class="muted">Mission Remain Time</span><span class="score-value">${esc(remainText)}</span></div>
