@@ -292,13 +292,12 @@ class SimulationManager:
         return process.returncode or 0, output
 
     async def reclaim_job_logs(self, job_dir: Path) -> None:
-        """Change root-owned bind-mount logs back to the manager user for deletion."""
-        logs_dir = job_dir / "share" / "logs"
-        if not logs_dir.is_dir() or logs_dir.is_symlink() or not logs_dir.resolve().is_relative_to(job_dir.resolve()):
+        """Change root-owned bind-mount files back to the manager user for deletion."""
+        if not job_dir.is_dir() or job_dir.is_symlink() or not job_dir.resolve().is_relative_to(JOBS_DIR.resolve()):
             return
         command = [
             "docker", "run", "--rm", "--user", "0:0",
-            "--volume", f"{logs_dir}:/cleanup",
+            "--volume", f"{job_dir}:/cleanup",
             "--entrypoint", "/bin/sh", "krpc/intball-simulator:latest",
             "-c", f"chown -R {os.getuid()}:{os.getgid()} /cleanup",
         ]
