@@ -81,13 +81,16 @@ Configuration is available through environment variables:
 | `SIM_MANAGER_PORT` | `8080` | Web Manager HTTP port |
 | `SIM_MAX_CONCURRENT` | `2` | Maximum simultaneous simulations |
 | `SIM_EXECUTION_TIME` | `30m` | Time before simulator container shutdown, in minutes using the `Nm` format |
+| `SIM_TASK_HISTORY_MAX` | `200` | Hard ceiling for the dynamically calculated task history limit |
 | `SIM_UPLOAD_MAX_MB` | `512` | Maximum compressed package size |
 | `SIM_ARCHIVE_MAX_MB` | `2048` | Maximum expanded package size |
 | `SIM_RETENTION_DAYS` | `30` | Days to keep finished simulations, including their workspaces and artifacts; `0` disables automatic deletion |
 | `SIM_CLEANUP_INTERVAL_HOURS` | `24` | Hours between cleanup runs; `0` disables the scheduled cleanup |
-| `SIM_LOG_THRESHOLD_GB` | available space on the data filesystem | Maximum combined archived log/artifact storage before the manager pauses starting queued simulations; `0` disables the limit |
+| `SIM_LOG_THRESHOLD_GB` | data filesystem capacity with 20% reserved | Maximum combined archived log/artifact storage before the manager pauses starting queued simulations; `0` disables the limit |
 
-The manager keeps at most 200 task records. At startup and before accepting an upload, it removes the oldest finished tasks as needed, including their workspaces and artifacts. Queued and active tasks are preserved; if they leave no finished task available to remove, a new upload is rejected until a task is deleted or finishes. The task section shows the current record count.
+The manager keeps task records within the storage-based limit, capped at 200. At startup and before accepting an upload, it removes the oldest finished tasks as needed, including their workspaces and artifacts. Queued and active tasks are preserved; if they leave no finished task available to remove, a new upload is rejected until a task is deleted or finishes. The task section shows the current record count and calculated limit.
+
+The task history limit is calculated from allocated log storage for completed tasks: it uses the 90th-percentile task size plus a 25% growth margin, and reserves 20% of the data filesystem for other files. `SIM_TASK_HISTORY_MAX` sets the maximum ceiling; the manager recalculates the effective limit as log usage and free disk space change.
 
 Each simulation card has an **Export logs and ROS bag** link that downloads a ZIP of archived logs and `.bag` files from that run (the `latest/` duplicate is omitted). The selected task's runtime output is shown in the **工作日誌** section, which also provides a TXT download link. The manager keeps `manager.log` in the ZIP. Automatic cleanup runs at manager startup and then on the configured interval; it removes finished, failed, or stopped jobs past the retention period, including their uploaded workspace and artifacts. Running and queued jobs are kept.
 

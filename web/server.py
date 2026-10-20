@@ -6,10 +6,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tarfile
 import tempfile
 import uuid
@@ -36,7 +38,10 @@ RETENTION_DAYS = max(0, int(os.environ.get("SIM_RETENTION_DAYS", "30")))
 CLEANUP_INTERVAL_HOURS = max(0, int(os.environ.get("SIM_CLEANUP_INTERVAL_HOURS", "24")))
 LOG_THRESHOLD_GB = max(0, float(os.environ["SIM_LOG_THRESHOLD_GB"])) if "SIM_LOG_THRESHOLD_GB" in os.environ else None
 LOG_THRESHOLD_BYTES = int(LOG_THRESHOLD_GB * 1024 ** 3) if LOG_THRESHOLD_GB else 0
-MAX_SIMULATION_RECORDS = 200
+MAX_SIMULATION_RECORDS = max(1, int(os.environ.get("SIM_TASK_HISTORY_MAX", "200")))
+TASK_STORAGE_RESERVE_RATIO = 0.20
+TASK_LOG_SAFETY_FACTOR = 1.25
+FALLBACK_TASK_LOG_BYTES = 4 * 1024 ** 3
 MISSION_TIME_LIMIT_SECONDS = 300
 ACTIVE_STATES = ("starting", "running", "stopping")
 TERMINAL_STATES = ("completed", "failed", "stopped")
@@ -227,18 +232,22 @@ class SimulationManager:
         self.lock = asyncio.Lock()
         self.log_usage_bytes = 0
         self.log_threshold_bytes = LOG_THRESHOLD_BYTES
+        self.task_history_limit = MAX_SIMULATION_RECORDS
 
     def refresh_log_usage(self) -> int:
         total = 0
+        per_job: dict[str, int] = {}
         if JOBS_DIR.exists():
             for job_dir in JOBS_DIR.iterdir():
                 if not job_dir.is_dir() or job_dir.is_symlink():
                     continue
+                job_total = 0
                 roots = [job_dir / "share" / "logs", job_dir / "manager.log"]
                 for root in roots:
                     if root.is_file() and not root.is_symlink():
                         try:
-                            total += root.stat().st_size
+                            stat = root.stat()
+                            job_total += getattr(stat, "st_blocks", 0) * 512 or stat.st_size
                         except OSError:
                             pass
                     elif root.is_dir() and not root.is_symlink():
@@ -248,17 +257,64 @@ class SimulationManager:
                                 path = Path(current) / name
                                 try:
                                     if not path.is_symlink():
-                                        total += path.stat().st_size
+                                        stat = path.stat()
+                                        job_total += getattr(stat, "st_blocks", 0) * 512 or stat.st_size
                                 except OSError:
                                     pass
+                total += job_total
+                per_job[job_dir.name] = job_total
         self.log_usage_bytes = total
+        with db_connect() as conn:
+            completed_ids = {
+                row["id"] for row in conn.execute(
+                    "SELECT id FROM simulations WHERE status = 'completed'"
+                ).fetchall()
+            }
+        completed_sizes = sorted(
+            size for job_id, size in per_job.items()
+            if job_id in completed_ids and size > 0
+        )
+        if completed_sizes:
+            p90_index = max(0, math.ceil(0.9 * len(completed_sizes)) - 1)
+            reference_size = math.ceil(completed_sizes[p90_index] * TASK_LOG_SAFETY_FACTOR)
+        else:
+            reference_size = FALLBACK_TASK_LOG_BYTES
+        disk = shutil.disk_usage(DATA_DIR)
+        reserve_bytes = int(disk.total * TASK_STORAGE_RESERVE_RATIO)
+        task_log_budget = max(0, disk.free + total - reserve_bytes)
+        self.task_history_limit = max(
+            1, min(MAX_SIMULATION_RECORDS, task_log_budget // reference_size)
+        )
         # By default, budget the logs against the actual filesystem that holds
-        # the manager data. Existing log bytes are included in that budget.
+        # the manager data while preserving room for other system data.
         self.log_threshold_bytes = (
             LOG_THRESHOLD_BYTES if LOG_THRESHOLD_GB is not None
-            else total + shutil.disk_usage(DATA_DIR).free
+            else max(1, total + disk.free - reserve_bytes)
         )
         return total
+
+    def reclaim_job_files(self, job_dir: Path) -> None:
+        """Change root-owned bind-mount files back to the manager user for deletion."""
+        if not job_dir.is_dir() or job_dir.is_symlink() or not job_dir.resolve().is_relative_to(JOBS_DIR.resolve()):
+            return
+        command = [
+            "docker", "run", "--rm", "--user", "0:0",
+            "--volume", f"{job_dir}:/cleanup",
+            "--entrypoint", "/bin/sh", "krpc/intball-simulator:latest",
+            "-c", f"chown -R {os.getuid()}:{os.getgid()} /cleanup",
+        ]
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            raise RuntimeError(result.stdout + result.stderr or "Could not change task file ownership.")
+
+    def remove_job_directory(self, job_dir: Path) -> None:
+        if not job_dir.exists():
+            return
+        try:
+            shutil.rmtree(job_dir)
+        except PermissionError:
+            self.reclaim_job_files(job_dir)
+            shutil.rmtree(job_dir)
 
     def compose_command(self, job_id: str, *args: str) -> tuple[list[str], dict[str, str]]:
         job_dir = JOBS_DIR / job_id
@@ -292,27 +348,6 @@ class SimulationManager:
             with (JOBS_DIR / job_id / "manager.log").open("a", encoding="utf-8") as log:
                 log.write(output)
         return process.returncode or 0, output
-
-    async def reclaim_job_logs(self, job_dir: Path) -> None:
-        """Change root-owned bind-mount files back to the manager user for deletion."""
-        if not job_dir.is_dir() or job_dir.is_symlink() or not job_dir.resolve().is_relative_to(JOBS_DIR.resolve()):
-            return
-        command = [
-            "docker", "run", "--rm", "--user", "0:0",
-            "--volume", f"{job_dir}:/cleanup",
-            "--entrypoint", "/bin/sh", "krpc/intball-simulator:latest",
-            "-c", f"chown -R {os.getuid()}:{os.getgid()} /cleanup",
-        ]
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=ROOT,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output_bytes, _ = await process.communicate()
-        if process.returncode:
-            detail = output_bytes.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(detail or "Could not change log file ownership.")
 
     async def stop_stack(self, job_id: str) -> None:
         _, output = await self.command(job_id, "logs", "--no-color", "--tail", "500")
@@ -377,8 +412,8 @@ class SimulationManager:
         self.session = ClientSession(auto_decompress=True)
         if RETENTION_DAYS and CLEANUP_INTERVAL_HOURS:
             await asyncio.to_thread(self.cleanup_expired_jobs)
-        await asyncio.to_thread(self.make_room_for_simulation)
         await asyncio.to_thread(self.refresh_log_usage)
+        await asyncio.to_thread(self.make_room_for_simulation)
         with db_connect() as conn:
             recovered = conn.execute(
                 "SELECT id FROM simulations WHERE status IN ('starting', 'running', 'stopping')"
@@ -435,18 +470,18 @@ class SimulationManager:
             if not job_dir.is_relative_to(JOBS_DIR.resolve()):
                 logger.warning("Skipping cleanup of unexpected job path: %s", job_id)
                 continue
-            if job_dir.exists():
-                shutil.rmtree(job_dir)
+            self.remove_job_directory(job_dir)
             with db_connect() as conn:
                 conn.execute("DELETE FROM simulations WHERE id = ?", (job_id,))
             removed += 1
         return removed
 
     def make_room_for_simulation(self) -> bool:
-        """Keep the task history within its fixed limit, preserving queued and active jobs."""
+        """Fit task history to log storage while preserving queued and active jobs."""
+        limit = self.task_history_limit
         with db_connect() as conn:
             count = conn.execute("SELECT COUNT(*) FROM simulations").fetchone()[0]
-            if count < MAX_SIMULATION_RECORDS:
+            if count < limit:
                 return True
             rows = conn.execute(
                 """SELECT id FROM simulations
@@ -461,13 +496,15 @@ class SimulationManager:
             if not job_dir.is_relative_to(JOBS_DIR.resolve()):
                 logger.warning("Skipping removal of unexpected job path: %s", job_id)
                 continue
-            if job_dir.exists():
-                shutil.rmtree(job_dir)
+            self.remove_job_directory(job_dir)
             with db_connect() as conn:
                 conn.execute("DELETE FROM simulations WHERE id = ?", (job_id,))
             count -= 1
-            logger.info("Removed oldest finished simulation %s to enforce task history limit", job_id)
-            if count < MAX_SIMULATION_RECORDS:
+            logger.info(
+                "Removed oldest finished simulation %s to enforce task history budget (%d records)",
+                job_id, limit,
+            )
+            if count < limit:
                 return True
         return False
 
@@ -625,7 +662,7 @@ async def list_simulations(request: web.Request) -> web.Response:
     return web.json_response({
         "simulations": [public_job(dict(row)) for row in rows],
         "task_count": task_count,
-        "task_limit": MAX_SIMULATION_RECORDS,
+        "task_limit": manager.task_history_limit,
         "max_concurrent": manager.limit,
         "log_usage_bytes": manager.log_usage_bytes,
         "log_threshold_bytes": manager.log_threshold_bytes,
@@ -677,6 +714,7 @@ async def upload_simulation(request: web.Request) -> web.Response:
 
     manager: SimulationManager = request.app["manager"]
     async with manager.lock:
+        await asyncio.to_thread(manager.refresh_log_usage)
         has_room = await asyncio.to_thread(manager.make_room_for_simulation)
         if not has_room:
             shutil.rmtree(job_dir, ignore_errors=True)
@@ -837,16 +875,12 @@ async def delete_simulation(request: web.Request) -> web.Response:
             raise web.HTTPBadRequest(text="Invalid simulation task path.")
         if job_dir.exists():
             try:
-                await asyncio.to_thread(shutil.rmtree, job_dir)
-            except PermissionError:
-                try:
-                    await manager.reclaim_job_logs(job_dir)
-                    await asyncio.to_thread(shutil.rmtree, job_dir)
-                except (OSError, RuntimeError) as exc:
-                    logger.exception("Could not delete simulation task %s", job_id)
-                    raise web.HTTPInternalServerError(
-                        text=f"Could not delete task files: {exc}"
-                    ) from exc
+                await asyncio.to_thread(manager.remove_job_directory, job_dir)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                logger.exception("Could not delete simulation task %s", job_id)
+                raise web.HTTPInternalServerError(
+                    text=f"Could not delete task files: {exc}"
+                ) from exc
         with db_connect() as conn:
             conn.execute("DELETE FROM simulations WHERE id = ?", (job_id,))
     await asyncio.to_thread(manager.refresh_log_usage)
