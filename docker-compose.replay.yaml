@@ -1,0 +1,15 @@
+services:
+    krpc:
+        image: krpc/krpc-replay:latest
+        ports:
+            - 80:80
+        volumes:
+            - /dev/shm:/dev/shm
+            - ./share:/tmp/share
+        environment:
+            - USER=ubuntu
+            - RESOLUTION=1680x900
+            - PLAY_RATE=${PLAY_RATE:-1}
+            - START_TIME=${START_TIME:-0}
+        command:
+            bash -c "/startup.sh &> /tmp/vnc.log & /play.sh"

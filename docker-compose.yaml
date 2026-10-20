@@ -1,0 +1,55 @@
+services:
+    krpc:
+        image: krpc/intball-simulator:latest
+        ports:
+            - ${SIM_WEB_MAPPING:-80:80}
+        volumes:
+            - ${SIM_SHM_DIR:-/dev/shm}:/dev/shm
+            - ${SIM_SHARE_DIR:-./share}:/tmp/share
+            - ./rviz:/home/intball/catkin_ws/src/platform_sim/description/rviz
+            - ./rootfs/startup.sh:/startup.sh:ro
+            - ./rootfs/run.sh:/run.sh:ro
+            - ./rootfs/krpc:/krpc:ro
+            - ./docker/ros_overlay/src/platform_sim/krpc_description/description/media/ib2_iss/media/materials/textures:/home/intball/catkin_ws/src/platform_sim/krpc_description/description/media/ib2_iss/media/materials/textures
+        networks:
+            - krpc
+        environment:
+            - USER=ubuntu
+            - SIM_MODE=${SIM_MODE:-regular}
+            - ROUND=${ROUND:-simulation}
+            - SIM_PATTERN=${SIM_PATTERN:-0}
+            - RESOLUTION=1680x900
+            - playTime=${execution_time:-10m}
+            - ROS_MASTER_URI=http://krpc:11311
+            - ROS_HOSTNAME=krpc
+            - LEVELS=${LEVELS:-normal}
+            - ENABLE_GRAVITY_MODULE=${ENABLE_GRAVITY_MODULE:-false}
+            - ENABLE_TOPIC_MONITOR=${ENABLE_TOPIC_MONITOR:-false}
+            - ENABLE_DEBUG_MODE=${ENABLE_DEBUG_MODE:-false}
+            - VNC_PASSWORD=${VNC_PASSWORD:-}
+            - VNC_ARGS=${X11VNC_ARGS:-}
+        command:
+            bash -c "/startup.sh &> /tmp/vnc.log & /run.sh"
+    krpc-user:
+        image: krpc/intball-simulator:latest
+        init: true
+        volumes:
+            - ${SIM_SHM_DIR:-/dev/shm}:/dev/shm
+            - ${SIM_SHARE_DIR:-./share}:/tmp/share
+            - ${SIM_USERS_DIR:-./users}:/users
+        networks:
+            - krpc
+        environment:
+            - DEBUG=debug
+            - SIM_MODE=${SIM_MODE:-regular}
+            - ROUND=${ROUND:-simulation}
+            - SIM_PATTERN=${SIM_PATTERN:-0}
+            - ROS_MASTER_URI=http://krpc:11311
+            - ROS_HOSTNAME=krpc-user
+            - ROS_LOG_DIR=/tmp/share/logs/latest/user_programs_logs/ros
+        working_dir: /users/catkin_ws/bootstrap
+        command:
+            bash -lc "./build-user.sh && ../../bootstrap/boot-ib2.sh"
+networks:
+    krpc:
+        driver: bridge
