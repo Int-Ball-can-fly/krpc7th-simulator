@@ -79,7 +79,7 @@ Configuration is available through environment variables:
 |---|---:|---|
 | `SIM_MANAGER_HOST` | `127.0.0.1` | Web Manager listen address |
 | `SIM_MANAGER_PORT` | `8080` | Web Manager HTTP port |
-| `SIM_MAX_CONCURRENT` | `3` | Maximum simultaneous simulations |
+| `SIM_MAX_CONCURRENT` | `2` | Maximum simultaneous simulations |
 | `SIM_UPLOAD_MAX_MB` | `512` | Maximum compressed package size |
 | `SIM_ARCHIVE_MAX_MB` | `2048` | Maximum expanded package size |
 | `SIM_RETENTION_DAYS` | `30` | Days to keep finished simulations, including their workspaces and artifacts; `0` disables automatic deletion |
@@ -91,6 +91,8 @@ The manager keeps at most 200 task records. At startup and before accepting an u
 Each simulation card has an **Export logs and ROS bag** link that downloads a ZIP of archived logs and `.bag` files from that run (the `latest/` duplicate is omitted). The selected task's runtime output is shown in the **工作日誌** section, which also provides a TXT download link. The manager keeps `manager.log` in the ZIP. Automatic cleanup runs at manager startup and then on the configured interval; it removes finished, failed, or stopped jobs past the retention period, including their uploaded workspace and artifacts. Running and queued jobs are kept.
 
 By default, the manager measures available space on the filesystem containing its data directory and uses that as the log budget, so no fixed 20 GiB limit applies. Set `SIM_LOG_THRESHOLD_GB` to an explicit limit, or `0` to disable log-based pausing. When combined per-job `share/logs` data and manager logs reach the limit, queued simulations stay queued until space is available. The manager shows current usage in the page header. Finished tasks can be deleted as a whole from their task card; this removes that task's workspace, logs, and artifacts. Selecting a finished task shows its log ZIP download instead of noVNC. The score section shows each checkpoint's final Judge level in a grid and the Mission Remain Time (five-minute limit minus the Judge-recorded mission duration).
+
+Task scores use `points × mg`, where each passed checkpoint contributes 10 points for Lv 3, 8 for Lv 2, and 5 for Lv 1, and `mg = 1 + (time remaining / 300)`. Tasks with any failed checkpoint are highlighted red; tasks without all checkpoints passed at Lv 3 are highlighted yellow. The task card and score panel show the calculated score.
 
 ## Replay
 

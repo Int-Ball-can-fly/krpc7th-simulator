@@ -30,7 +30,7 @@ DB_PATH = DATA_DIR / "state.sqlite3"
 COMPOSE_FILE = ROOT / "docker-compose.yaml"
 MAX_UPLOAD_BYTES = max(1, int(os.environ.get("SIM_UPLOAD_MAX_MB", "512"))) * 1024 * 1024
 MAX_ARCHIVE_BYTES = max(1, int(os.environ.get("SIM_ARCHIVE_MAX_MB", "2048"))) * 1024 * 1024
-DEFAULT_CONCURRENCY = max(1, int(os.environ.get("SIM_MAX_CONCURRENT", "3")))
+DEFAULT_CONCURRENCY = max(1, int(os.environ.get("SIM_MAX_CONCURRENT", "2")))
 RETENTION_DAYS = max(0, int(os.environ.get("SIM_RETENTION_DAYS", "30")))
 CLEANUP_INTERVAL_HOURS = max(0, int(os.environ.get("SIM_CLEANUP_INTERVAL_HOURS", "24")))
 LOG_THRESHOLD_GB = max(0, float(os.environ["SIM_LOG_THRESHOLD_GB"])) if "SIM_LOG_THRESHOLD_GB" in os.environ else None
@@ -771,9 +771,37 @@ async def simulation_score(request: web.Request) -> web.Response:
         mission_remain_seconds = max(0, MISSION_TIME_LIMIT_SECONDS - float(duration)) if duration is not None else None
     except (TypeError, ValueError):
         mission_remain_seconds = None
+    checkpoints = ((result or {}).get("JudgeReport", {}).get("checkpoint_detail", []))
+    if not isinstance(checkpoints, list):
+        checkpoints = []
+    point_values = {3: 10, 2: 8, 1: 5}
+    def checkpoint_points(item: Any) -> int:
+        if not isinstance(item, dict) or item.get("success") is not True:
+            return 0
+        try:
+            level = int(item.get("level", 0) or 0)
+        except (TypeError, ValueError):
+            level = 0
+        return point_values.get(level, 0)
+
+    points = sum(checkpoint_points(item) for item in checkpoints)
+    failed_checkpoint = any(isinstance(item, dict) and item.get("success") is False for item in checkpoints)
+    all_lv3 = bool(checkpoints) and all(
+        isinstance(item, dict) and item.get("success") is True and item.get("level") == 3
+        for item in checkpoints
+    )
+    multiplier = 1 + (mission_remain_seconds / MISSION_TIME_LIMIT_SECONDS) if mission_remain_seconds is not None else None
+    score_summary = {
+        "points": points,
+        "multiplier": multiplier,
+        "final_score": points * multiplier if multiplier is not None else None,
+        "failed_checkpoint": failed_checkpoint,
+        "all_lv3": all_lv3,
+    } if result is not None else None
     return web.json_response({
         "score": result,
         "mission_remain_seconds": mission_remain_seconds,
+        "score_summary": score_summary,
         "status": job["status"],
     })
 
@@ -1019,7 +1047,11 @@ INDEX_HTML = r"""<!doctype html>
     button:disabled { opacity:.5; cursor:wait; } button.secondary { background:#31434d; color:#edf4f6; } button.stop { background:#542e32; color:#ffd7d3; }
     .queue-list { display:grid; gap:10px; max-height:min(60vh,720px); overflow-y:auto; overscroll-behavior:contain; padding:2px 6px 2px 2px; scrollbar-gutter:stable; }
     .job { padding:12px; border:1px solid var(--line); border-radius:9px; display:grid; gap:7px; }
+    .job.score-yellow { border-color:#d6a83d; background:#302916; }
+    .job.score-red { border-color:#d95454; background:#351d22; }
     .job[aria-pressed="true"] { border:2px solid var(--accent); background:#1d3537; box-shadow:0 0 0 2px #71d6bc33; }
+    .job.score-yellow[aria-pressed="true"] { border-color:#f0c451; background:#302916; }
+    .job.score-red[aria-pressed="true"] { border-color:#ff6b6b; background:#351d22; }
     .job:focus-visible { outline:2px solid #c7dcff; outline-offset:2px; }
     .job-top { display:flex; justify-content:space-between; align-items:center; gap:10px; } .job-name { overflow-wrap:anywhere; font-weight:600; }
     .badge { font-size:12px; padding:2px 8px; border-radius:20px; background:#34444e; white-space:nowrap; }
@@ -1063,6 +1095,7 @@ INDEX_HTML = r"""<!doctype html>
   const labels = {queued:'等待中',starting:'準備中',running:'執行中',stopping:'停止中',completed:'完成',failed:'失敗',stopped:'已停止'};
   let selected = null;
   let selectedStatus = null;
+  const taskScoreCache = new Map();
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const formatTaskTime = value => new Intl.DateTimeFormat(undefined, {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value));
   function updateSelectedHighlight() {
@@ -1090,14 +1123,21 @@ INDEX_HTML = r"""<!doctype html>
       } else usage.textContent = `Log 空間 ${(data.log_usage_bytes / 1024 ** 3).toFixed(2)} GiB（未設上限）`;
       const list = document.getElementById('jobs');
       if (!sims.length) list.innerHTML = '<div class="muted">尚無模擬工作，上傳封包即可開始。</div>';
-      else list.innerHTML = sims.map(job => `<article class="job" data-select="${esc(job.id)}" tabindex="0" role="button" aria-pressed="${selected === job.id}"${selected === job.id ? ' aria-current="true"' : ''}>
+      else list.innerHTML = sims.map(job => {
+        const summary = taskScoreCache.get(job.id)?.score_summary;
+        const scoreClass = summary?.failed_checkpoint ? 'score-red' : summary && !summary.all_lv3 ? 'score-yellow' : '';
+        const scoreText = summary ? (summary.final_score == null ? `Points: ${summary.points}` : `Score: ${Number(summary.final_score).toFixed(2)}`) : '';
+        return `<article id="job-${esc(job.id)}" class="job ${scoreClass}" data-select="${esc(job.id)}" tabindex="0" role="button" aria-pressed="${selected === job.id}"${selected === job.id ? ' aria-current="true"' : ''}>
         <div class="job-top"><span class="job-name">${esc(job.filename)}</span><span class="badge ${esc(job.status)}">${labels[job.status] || esc(job.status)}</span></div>
         <div class="muted">時間：${esc(formatTaskTime(job.created_at))}${job.error ? ` · ${esc(job.error)}` : ''}</div>
+        ${scoreText ? `<div class="muted">${esc(scoreText)}</div>` : ''}
         <div class="job-actions">
           ${job.status === 'running' || job.status === 'starting' || job.status === 'queued' ? `<button class="stop" data-stop="${esc(job.id)}">停止</button>` : ''}
           <a class="button secondary" href="/api/simulations/${encodeURIComponent(job.id)}/export">匯出日誌與 ROS bag</a>
           ${['completed','failed','stopped'].includes(job.status) ? `<button class="stop" data-delete-task="${esc(job.id)}">刪除任務</button>` : ''}
-        </div></article>`).join('');
+        </div></article>`;
+      }).join('');
+      loadTaskScoreSummaries(sims);
       list.querySelectorAll('[data-select]').forEach(card => {
         card.style.cursor = 'pointer';
         card.onclick = event => { if (!event.target.closest('button,a')) selectJob(sims.find(job => job.id === card.dataset.select)); };
@@ -1140,6 +1180,26 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('notice').textContent = `無法連線到管理服務：${error}`;
       document.getElementById('notice').className = 'notice error';
     }
+  }
+  async function loadTaskScoreSummaries(sims) {
+    const finished = sims.filter(job => ['completed','failed','stopped'].includes(job.status) && !taskScoreCache.has(job.id));
+    await Promise.all(finished.map(async job => {
+      try {
+        const response = await fetch(`/api/simulations/${encodeURIComponent(job.id)}/score`);
+        if (!response.ok) return;
+        const data = await response.json();
+        taskScoreCache.set(job.id, data);
+        const card = document.getElementById(`job-${job.id}`);
+        if (!card || !data.score_summary) return;
+        const summary = data.score_summary;
+        if (summary.failed_checkpoint) card.classList.add('score-red');
+        else if (!summary.all_lv3) card.classList.add('score-yellow');
+        const score = summary.final_score == null ? `Points: ${summary.points}` : `Score: ${Number(summary.final_score).toFixed(2)}`;
+        const line = document.createElement('div');
+        line.className = 'muted'; line.textContent = score;
+        card.querySelector('.job-top').after(line);
+      } catch (_) { /* retry on a later refresh */ }
+    }));
   }
   function showView(job) {
     if (job && ['completed','failed','stopped'].includes(job.status)) {
@@ -1193,10 +1253,10 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok) throw new Error(await response.text());
       const data = await response.json();
       if (selected !== job.id) return;
-      renderScore(data.score, data.mission_remain_seconds);
+      renderScore(data.score, data.mission_remain_seconds, data.score_summary);
     } catch (error) { scoreNode.textContent = `Unable to load score results: ${error}`; }
   }
-  function renderScore(result, missionRemainSeconds) {
+  function renderScore(result, missionRemainSeconds, summary) {
     const node = document.getElementById('score-results');
     if (!result) { node.innerHTML = '<div class="muted">No result.json score data yet.</div>'; return; }
     const report = result.JudgeReport || {};
@@ -1205,6 +1265,9 @@ INDEX_HTML = r"""<!doctype html>
     const checkpoints = Array.isArray(report.checkpoint_detail) ? report.checkpoint_detail : [];
     const remainText = missionRemainSeconds == null ? (mission.started && !mission.finished ? 'In progress' : '—') : `${Number(missionRemainSeconds).toFixed(2)} sec`;
     node.innerHTML = `<div class="score-grid">
+      <div class="score-card"><span class="muted">Points</span><span class="score-value">${summary ? esc(summary.points) : '—'}</span></div>
+      <div class="score-card"><span class="muted">Time Multiplier (mg)</span><span class="score-value">${summary?.multiplier == null ? '—' : `${Number(summary.multiplier).toFixed(3)}×`}</span></div>
+      <div class="score-card"><span class="muted">Final Score (points × mg)</span><span class="score-value">${summary?.final_score == null ? '—' : Number(summary.final_score).toFixed(2)}</span></div>
       <div class="score-card"><span class="muted">Mission Remain Time</span><span class="score-value">${esc(remainText)}</span></div>
       <div class="score-card"><span class="muted">Mission Time</span><span class="score-value">${mission.duration_sec == null ? '—' : `${esc(mission.duration_sec)} sec`}</span></div>
       <div class="score-card"><span class="muted">Goal</span><span class="score-value">${goal.success ? 'Success' : mission.finished ? 'Not achieved' : 'Incomplete'}</span></div>
