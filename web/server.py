@@ -1112,6 +1112,8 @@ INDEX_HTML = r"""<!doctype html>
     .checkpoint-card { padding:12px; border:1px solid var(--line); border-radius:8px; background:#0e151a; text-align:center; }
     .checkpoint-level { display:block; font-size:21px; font-weight:700; margin-top:4px; }
     .score-card { padding:12px; border:1px solid var(--line); border-radius:8px; } .score-value { display:block; font-size:20px; font-weight:700; }
+    .score-featured { display:flex; justify-content:space-between; align-items:center; gap:16px; margin:12px 0; padding:16px 18px; border:1px solid var(--accent); border-radius:9px; background:#1d3537; }
+    .score-featured strong { color:var(--accent); font-size:30px; line-height:1.1; }
     .viewer-head { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px; } .viewer { position:relative; width:100%; aspect-ratio:16/9; max-height:calc(100vh - 300px); min-height:280px; background:#080d10; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     .viewer-download { display:inline-block; background:var(--accent); color:#0d2421; padding:10px 16px; border-radius:7px; font-weight:700; text-decoration:none; }
     iframe { display:block; width:100%; height:100%; border:0; } .empty-view { display:grid; place-items:center; height:100%; min-height:280px; color:var(--muted); }
@@ -1303,12 +1305,28 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok) throw new Error(await response.text());
       const data = await response.json();
       if (selected !== job.id) return;
-      renderScore(data.score_summary);
+      renderScore(data.score, data.mission_remain_seconds, data.score_summary);
     } catch (error) { scoreNode.textContent = `Unable to load score results: ${error}`; }
   }
-  function renderScore(summary) {
+  function renderScore(result, missionRemainSeconds, summary) {
     const node = document.getElementById('score-results');
-    node.innerHTML = `<div class="score-card"><span class="muted">Final Score</span><span class="score-value">${summary?.score_eligible ? Number(summary.final_score).toFixed(2) : '未完成或逾時，未計分'}</span></div>`;
+    if (!result) {
+      node.innerHTML = `<div class="score-featured"><span>總分</span><strong>未計分</strong></div><div class="muted">尚無任務結果。</div>`;
+      return;
+    }
+    const report = result.JudgeReport || {};
+    const mission = report.mission || {};
+    const goal = report.goal || {};
+    const checkpoints = Array.isArray(report.checkpoint_detail) ? report.checkpoint_detail : [];
+    const goalStatus = goal.success ? '已達成' : mission.finished ? '未達成' : '尚未完成';
+    const remainText = missionRemainSeconds == null ? '—' : `${Number(missionRemainSeconds).toFixed(2)} 秒`;
+    const finalScore = summary?.score_eligible ? Number(summary.final_score).toFixed(2) : '未完成或逾時，未計分';
+    node.innerHTML = `<div class="score-featured"><span>總分</span><strong>${esc(finalScore)}</strong></div>
+      <div class="score-grid">
+        <div class="score-card"><span class="muted">任務是否達成</span><span class="score-value">${goalStatus}</span></div>
+        <div class="score-card"><span class="muted">剩餘時間</span><span class="score-value">${esc(remainText)}</span></div>
+      </div>
+      ${checkpoints.length ? `<h3>Checkpoint</h3><div class="checkpoint-grid">${checkpoints.map(item => `<div class="checkpoint-card"><span>CP ${esc(item.checkpoint_id)}</span><span class="checkpoint-level">Lv ${esc(item.level ?? 0)}</span><span class="muted">${item.success ? '通過' : '未通過'}</span></div>`).join('')}</div>` : '<div class="muted">沒有 checkpoint 結果。</div>'}`;
   }
   document.getElementById('upload-form').addEventListener('submit', async event => {
     event.preventDefault();
