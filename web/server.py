@@ -291,6 +291,28 @@ class SimulationManager:
                 log.write(output)
         return process.returncode or 0, output
 
+    async def reclaim_job_logs(self, job_dir: Path) -> None:
+        """Change root-owned bind-mount logs back to the manager user for deletion."""
+        logs_dir = job_dir / "share" / "logs"
+        if not logs_dir.is_dir() or logs_dir.is_symlink() or not logs_dir.resolve().is_relative_to(job_dir.resolve()):
+            return
+        command = [
+            "docker", "run", "--rm", "--user", "0:0",
+            "--volume", f"{logs_dir}:/cleanup",
+            "--entrypoint", "/bin/sh", "krpc/intball-simulator:latest",
+            "-c", f"chown -R {os.getuid()}:{os.getgid()} /cleanup",
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output_bytes, _ = await process.communicate()
+        if process.returncode:
+            detail = output_bytes.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or "Could not change log file ownership.")
+
     async def stop_stack(self, job_id: str) -> None:
         _, output = await self.command(job_id, "logs", "--no-color", "--tail", "500")
         if output:
@@ -772,7 +794,17 @@ async def delete_simulation(request: web.Request) -> web.Response:
         if not job_dir.is_relative_to(JOBS_DIR.resolve()):
             raise web.HTTPBadRequest(text="Invalid simulation task path.")
         if job_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, job_dir)
+            try:
+                await asyncio.to_thread(shutil.rmtree, job_dir)
+            except PermissionError:
+                try:
+                    await manager.reclaim_job_logs(job_dir)
+                    await asyncio.to_thread(shutil.rmtree, job_dir)
+                except (OSError, RuntimeError) as exc:
+                    logger.exception("Could not delete simulation task %s", job_id)
+                    raise web.HTTPInternalServerError(
+                        text=f"Could not delete task files: {exc}"
+                    ) from exc
         with db_connect() as conn:
             conn.execute("DELETE FROM simulations WHERE id = ?", (job_id,))
     await asyncio.to_thread(manager.refresh_log_usage)
