@@ -796,12 +796,20 @@ async def simulation_score(request: web.Request) -> web.Response:
         for item in checkpoints
     )
     multiplier = 1 + (mission_remain_seconds / MISSION_TIME_LIMIT_SECONDS) if mission_remain_seconds is not None else None
+    score_eligible = (
+        job["status"] == "completed"
+        and isinstance(mission, dict)
+        and mission.get("finished") is True
+        and mission_remain_seconds is not None
+        and mission_remain_seconds > 0
+    )
     score_summary = {
         "level_points": level_points,
         "goal_points": goal_points,
         "points": points,
         "multiplier": multiplier,
-        "final_score": points * multiplier if multiplier is not None else None,
+        "final_score": points * multiplier if score_eligible and multiplier is not None else None,
+        "score_eligible": score_eligible,
         "failed_checkpoint": failed_checkpoint,
         "all_lv3": all_lv3,
     } if result is not None else None
@@ -1133,7 +1141,7 @@ INDEX_HTML = r"""<!doctype html>
       else list.innerHTML = sims.map(job => {
         const summary = taskScoreCache.get(job.id)?.score_summary;
         const scoreClass = summary?.failed_checkpoint ? 'score-red' : summary && !summary.all_lv3 ? 'score-yellow' : '';
-        const scoreText = summary ? (summary.final_score == null ? `Points: ${summary.points}` : `Score: ${Number(summary.final_score).toFixed(2)}`) : '';
+        const scoreText = summary?.score_eligible ? `Score: ${Number(summary.final_score).toFixed(2)}` : '';
         return `<article id="job-${esc(job.id)}" class="job ${scoreClass}" data-select="${esc(job.id)}" tabindex="0" role="button" aria-pressed="${selected === job.id}"${selected === job.id ? ' aria-current="true"' : ''}>
         <div class="job-top"><span class="job-name">${esc(job.filename)}</span><span class="badge ${esc(job.status)}">${labels[job.status] || esc(job.status)}</span></div>
         <div class="muted">時間：${esc(formatTaskTime(job.created_at))}${job.error ? ` · ${esc(job.error)}` : ''}</div>
@@ -1201,10 +1209,11 @@ INDEX_HTML = r"""<!doctype html>
         const summary = data.score_summary;
         if (summary.failed_checkpoint) card.classList.add('score-red');
         else if (!summary.all_lv3) card.classList.add('score-yellow');
-        const score = summary.final_score == null ? `Points: ${summary.points}` : `Score: ${Number(summary.final_score).toFixed(2)}`;
-        const line = document.createElement('div');
-        line.className = 'muted'; line.textContent = score;
-        card.querySelector('.job-top').after(line);
+        if (summary.score_eligible) {
+          const line = document.createElement('div');
+          line.className = 'muted'; line.textContent = `Score: ${Number(summary.final_score).toFixed(2)}`;
+          card.querySelector('.job-top').after(line);
+        }
       } catch (_) { /* retry on a later refresh */ }
     }));
   }
@@ -1260,29 +1269,12 @@ INDEX_HTML = r"""<!doctype html>
       if (!response.ok) throw new Error(await response.text());
       const data = await response.json();
       if (selected !== job.id) return;
-      renderScore(data.score, data.mission_remain_seconds, data.score_summary);
+      renderScore(data.score_summary);
     } catch (error) { scoreNode.textContent = `Unable to load score results: ${error}`; }
   }
-  function renderScore(result, missionRemainSeconds, summary) {
+  function renderScore(summary) {
     const node = document.getElementById('score-results');
-    if (!result) { node.innerHTML = '<div class="muted">No result.json score data yet.</div>'; return; }
-    const report = result.JudgeReport || {};
-    const mission = report.mission || {};
-    const goal = report.goal || {};
-    const checkpoints = Array.isArray(report.checkpoint_detail) ? report.checkpoint_detail : [];
-    const remainText = missionRemainSeconds == null ? (mission.started && !mission.finished ? 'In progress' : '—') : `${Number(missionRemainSeconds).toFixed(2)} sec`;
-    node.innerHTML = `<div class="score-grid">
-      <div class="score-card"><span class="muted">Level Points</span><span class="score-value">${summary ? esc(summary.level_points) : '—'}</span></div>
-      <div class="score-card"><span class="muted">Goal Points</span><span class="score-value">${summary ? esc(summary.goal_points) : '—'}</span></div>
-      <div class="score-card"><span class="muted">Total Points</span><span class="score-value">${summary ? esc(summary.points) : '—'}</span></div>
-      <div class="score-card"><span class="muted">Time Multiplier (mg)</span><span class="score-value">${summary?.multiplier == null ? '—' : `${Number(summary.multiplier).toFixed(3)}×`}</span></div>
-      <div class="score-card"><span class="muted">Final Score (points × mg)</span><span class="score-value">${summary?.final_score == null ? '—' : Number(summary.final_score).toFixed(2)}</span></div>
-      <div class="score-card"><span class="muted">Mission Remain Time</span><span class="score-value">${esc(remainText)}</span></div>
-      <div class="score-card"><span class="muted">Mission Time</span><span class="score-value">${mission.duration_sec == null ? '—' : `${esc(mission.duration_sec)} sec`}</span></div>
-      <div class="score-card"><span class="muted">Goal</span><span class="score-value">${goal.success ? 'Success' : mission.finished ? 'Not achieved' : 'Incomplete'}</span></div>
-      <div class="score-card"><span class="muted">Illegal</span><span class="score-value">${result.Illegal ? 'Yes' : 'No'}</span></div>
-      <div class="score-card"><span class="muted">Checkpoints Passed</span><span class="score-value">${checkpoints.filter(item => item.success).length} / ${checkpoints.length}</span></div>
-    </div>${checkpoints.length ? `<h3>Final Checkpoint Levels</h3><div class="checkpoint-grid">${checkpoints.map(item => `<div class="checkpoint-card"><span>CP ${esc(item.checkpoint_id)}</span><span class="checkpoint-level">Lv ${esc(item.level ?? 0)}</span><span class="muted">${item.success ? 'Passed' : 'Not passed'}</span></div>`).join('')}</div>` : '<div class="muted">No checkpoint details.</div>'}`;
+    node.innerHTML = `<div class="score-card"><span class="muted">Final Score</span><span class="score-value">${summary?.score_eligible ? Number(summary.final_score).toFixed(2) : '未完成或逾時，未計分'}</span></div>`;
   }
   document.getElementById('upload-form').addEventListener('submit', async event => {
     event.preventDefault();
