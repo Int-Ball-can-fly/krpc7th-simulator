@@ -71,7 +71,7 @@ python web/server.py
 
 Build the simulator image first with `bash ./build.sh` if it is not already available locally.
 
-Open <http://127.0.0.1:8080>. The manager listens on localhost only, so it can be exposed remotely through Tailscale Serve. Uploaded jobs and manager state are stored under `.simulator-manager/`.
+Open <http://127.0.0.1:8080>. The manager listens on localhost only, so it can be exposed remotely through Tailscale Serve. Uploaded jobs, logs, and manager state are stored under `/mnt/data/simulator-manager/` by default. Set `SIM_MANAGER_DATA_DIR` to change this location.
 
 Configuration is available through environment variables:
 
@@ -84,13 +84,13 @@ Configuration is available through environment variables:
 | `SIM_ARCHIVE_MAX_MB` | `2048` | Maximum expanded package size |
 | `SIM_RETENTION_DAYS` | `30` | Days to keep finished simulations, including their workspaces and artifacts; `0` disables automatic deletion |
 | `SIM_CLEANUP_INTERVAL_HOURS` | `24` | Hours between cleanup runs; `0` disables the scheduled cleanup |
-| `SIM_LOG_THRESHOLD_GB` | `20` | Maximum combined archived log/artifact storage before the manager pauses starting queued simulations; `0` disables the limit |
+| `SIM_LOG_THRESHOLD_GB` | available space on the data filesystem | Maximum combined archived log/artifact storage before the manager pauses starting queued simulations; `0` disables the limit |
 
 The manager keeps at most 200 task records. At startup and before accepting an upload, it removes the oldest finished tasks as needed, including their workspaces and artifacts. Queued and active tasks are preserved; if they leave no finished task available to remove, a new upload is rejected until a task is deleted or finishes. The task section shows the current record count.
 
 Each simulation card has an **Export logs and ROS bag** link that downloads a ZIP of archived logs and `.bag` files from that run (the `latest/` duplicate is omitted). The manager also keeps `manager.log` in the ZIP. Automatic cleanup runs at manager startup and then on the configured interval; it removes finished, failed, or stopped jobs past the retention period, including their uploaded workspace and artifacts. Running and queued jobs are kept.
 
-When combined per-job `share/logs` data and manager logs reach `SIM_LOG_THRESHOLD_GB`, queued simulations stay queued until log storage drops below the limit. The manager shows current usage in the page header. Finished tasks can be deleted as a whole from their task card; this removes that task's workspace, logs, and artifacts. Selecting a finished task shows its log ZIP download instead of noVNC. The score section shows each checkpoint's final Judge level in a grid and the Mission Remain Time (five-minute limit minus the Judge-recorded mission duration); logs are available through download and are not listed in the page.
+By default, the manager measures available space on the filesystem containing its data directory and uses that as the log budget, so no fixed 20 GiB limit applies. Set `SIM_LOG_THRESHOLD_GB` to an explicit limit, or `0` to disable log-based pausing. When combined per-job `share/logs` data and manager logs reach the limit, queued simulations stay queued until space is available. The manager shows current usage in the page header. Finished tasks can be deleted as a whole from their task card; this removes that task's workspace, logs, and artifacts. Selecting a finished task shows its log ZIP download instead of noVNC. The score section shows each checkpoint's final Judge level in a grid and the Mission Remain Time (five-minute limit minus the Judge-recorded mission duration); logs are available through download and are not listed in the page.
 
 ## Replay
 

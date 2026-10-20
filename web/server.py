@@ -24,7 +24,7 @@ from aiohttp import ClientSession, WSMsgType, web
 
 logger = logging.getLogger("simulator_manager")
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("SIM_MANAGER_DATA_DIR", ROOT / ".simulator-manager")).resolve()
+DATA_DIR = Path(os.environ.get("SIM_MANAGER_DATA_DIR", "/mnt/data/simulator-manager")).resolve()
 JOBS_DIR = DATA_DIR / "jobs"
 DB_PATH = DATA_DIR / "state.sqlite3"
 COMPOSE_FILE = ROOT / "docker-compose.yaml"
@@ -33,7 +33,7 @@ MAX_ARCHIVE_BYTES = max(1, int(os.environ.get("SIM_ARCHIVE_MAX_MB", "2048"))) * 
 DEFAULT_CONCURRENCY = max(1, int(os.environ.get("SIM_MAX_CONCURRENT", "2")))
 RETENTION_DAYS = max(0, int(os.environ.get("SIM_RETENTION_DAYS", "30")))
 CLEANUP_INTERVAL_HOURS = max(0, int(os.environ.get("SIM_CLEANUP_INTERVAL_HOURS", "24")))
-LOG_THRESHOLD_GB = max(0, float(os.environ.get("SIM_LOG_THRESHOLD_GB", "20")))
+LOG_THRESHOLD_GB = max(0, float(os.environ["SIM_LOG_THRESHOLD_GB"])) if "SIM_LOG_THRESHOLD_GB" in os.environ else None
 LOG_THRESHOLD_BYTES = int(LOG_THRESHOLD_GB * 1024 ** 3) if LOG_THRESHOLD_GB else 0
 MAX_SIMULATION_RECORDS = 200
 MISSION_TIME_LIMIT_SECONDS = 300
@@ -225,6 +225,7 @@ class SimulationManager:
         self.session: ClientSession | None = None
         self.lock = asyncio.Lock()
         self.log_usage_bytes = 0
+        self.log_threshold_bytes = LOG_THRESHOLD_BYTES
 
     def refresh_log_usage(self) -> int:
         total = 0
@@ -250,6 +251,12 @@ class SimulationManager:
                                 except OSError:
                                     pass
         self.log_usage_bytes = total
+        # By default, budget the logs against the actual filesystem that holds
+        # the manager data. Existing log bytes are included in that budget.
+        self.log_threshold_bytes = (
+            LOG_THRESHOLD_BYTES if LOG_THRESHOLD_GB is not None
+            else total + shutil.disk_usage(DATA_DIR).free
+        )
         return total
 
     def compose_command(self, job_id: str, *args: str) -> tuple[list[str], dict[str, str]]:
@@ -454,7 +461,7 @@ class SimulationManager:
                         "SELECT COUNT(*) FROM simulations WHERE status IN ('starting', 'running', 'stopping')"
                     ).fetchone()[0]
                     capacity = max(0, self.limit - active)
-                    queued = [] if LOG_THRESHOLD_BYTES and self.log_usage_bytes >= LOG_THRESHOLD_BYTES else conn.execute(
+                    queued = [] if self.log_threshold_bytes and self.log_usage_bytes >= self.log_threshold_bytes else conn.execute(
                         "SELECT id FROM simulations WHERE status = 'queued' ORDER BY created_at, id LIMIT ?",
                         (capacity,),
                     ).fetchall()
@@ -598,8 +605,8 @@ async def list_simulations(request: web.Request) -> web.Response:
         "task_limit": MAX_SIMULATION_RECORDS,
         "max_concurrent": manager.limit,
         "log_usage_bytes": manager.log_usage_bytes,
-        "log_threshold_bytes": LOG_THRESHOLD_BYTES,
-        "log_blocked": bool(LOG_THRESHOLD_BYTES and manager.log_usage_bytes >= LOG_THRESHOLD_BYTES),
+        "log_threshold_bytes": manager.log_threshold_bytes,
+        "log_blocked": bool(manager.log_threshold_bytes and manager.log_usage_bytes >= manager.log_threshold_bytes),
     })
 
 
@@ -744,7 +751,8 @@ async def delete_simulation(request: web.Request) -> web.Response:
         job_dir = (JOBS_DIR / job_id).resolve()
         if not job_dir.is_relative_to(JOBS_DIR.resolve()):
             raise web.HTTPBadRequest(text="Invalid simulation task path.")
-        await asyncio.to_thread(shutil.rmtree, job_dir, True)
+        if job_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, job_dir)
         with db_connect() as conn:
             conn.execute("DELETE FROM simulations WHERE id = ?", (job_id,))
     await asyncio.to_thread(manager.refresh_log_usage)
