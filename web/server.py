@@ -688,6 +688,26 @@ async def simulation_logs(request: web.Request) -> web.Response:
     return web.Response(text=content, content_type="text/plain")
 
 
+async def simulation_test_log_download(request: web.Request) -> web.Response:
+    """Download the runtime output shown beneath the simulation viewer."""
+    job_id = request.match_info["job_id"]
+    if not fetch_job(job_id):
+        raise web.HTTPNotFound(text="Simulation not found.")
+    code, output = await request.app["manager"].command(
+        job_id, "logs", "--no-color", "--tail", "300"
+    )
+    manager_log = JOBS_DIR / job_id / "manager.log"
+    prefix = manager_log.read_text(encoding="utf-8", errors="replace") if manager_log.is_file() else ""
+    if code and not output:
+        output = "Unable to read container logs.\n"
+    content = (prefix + "\n" + output)[-200_000:]
+    return web.Response(
+        text=content,
+        content_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="simulation-{job_id}-test-log.txt"'},
+    )
+
+
 def simulation_artifact_files(job_id: str) -> tuple[Path, list[Path]]:
     job_root = (JOBS_DIR / job_id).resolve()
     logs_dir = job_root / "share" / "logs"
@@ -934,6 +954,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/simulations/{job_id}", get_simulation)
     app.router.add_post("/api/simulations/{job_id}/stop", stop_simulation)
     app.router.add_get("/api/simulations/{job_id}/logs", simulation_logs)
+    app.router.add_get("/api/simulations/{job_id}/test-log.txt", simulation_test_log_download)
     app.router.add_get("/api/simulations/{job_id}/score", simulation_score)
     app.router.add_route("DELETE", "/api/simulations/{job_id}", delete_simulation)
     app.router.add_get("/api/simulations/{job_id}/export", simulation_export)
@@ -1044,6 +1065,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="job-actions">
           ${job.status === 'running' || job.status === 'starting' || job.status === 'queued' ? `<button class="stop" data-stop="${esc(job.id)}">停止</button>` : ''}
           <a class="button secondary" href="/api/simulations/${encodeURIComponent(job.id)}/export">匯出日誌與 ROS bag</a>
+          <a class="button secondary" href="/api/simulations/${encodeURIComponent(job.id)}/test-log.txt">下載測試日誌（TXT）</a>
           ${['completed','failed','stopped'].includes(job.status) ? `<button class="stop" data-delete-task="${esc(job.id)}">刪除任務</button>` : ''}
         </div></article>`).join('');
       list.querySelectorAll('[data-select]').forEach(card => {
