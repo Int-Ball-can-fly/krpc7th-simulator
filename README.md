@@ -79,7 +79,7 @@ Configuration is available through environment variables:
 |---|---:|---|
 | `SIM_MANAGER_HOST` | `127.0.0.1` | Web Manager listen address |
 | `SIM_MANAGER_PORT` | `8080` | Web Manager HTTP port |
-| `SIM_MAX_CONCURRENT` | `2` | Maximum simultaneous simulations |
+| `SIM_MAX_CONCURRENT` | `3` | Maximum simultaneous simulations |
 | `SIM_UPLOAD_MAX_MB` | `512` | Maximum compressed package size |
 | `SIM_ARCHIVE_MAX_MB` | `2048` | Maximum expanded package size |
 | `SIM_RETENTION_DAYS` | `30` | Days to keep finished simulations, including their workspaces and artifacts; `0` disables automatic deletion |
