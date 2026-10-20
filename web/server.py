@@ -1024,7 +1024,7 @@ INDEX_HTML = r"""<!doctype html>
     <section class="panel">
       <div class="viewer-head"><div><h2 style="margin:0">模擬畫面</h2><div id="selected-name" class="muted">選擇一個模擬工作</div></div><button id="refresh" class="secondary" type="button">重新整理</button></div>
       <div id="viewer" class="viewer"><div class="empty-view">目前沒有選取執行中的模擬</div></div>
-      <details id="logs-panel" style="margin-top:16px"><summary>工作日誌</summary><pre id="logs">選擇工作後自動載入。</pre></details>
+      <details id="logs-panel" style="margin-top:16px"><summary>工作日誌</summary><div class="job-actions" style="margin-top:10px"><a id="test-log-download" class="button secondary" href="#" hidden>下載測試日誌（TXT）</a></div><pre id="logs">選擇工作後自動載入。</pre></details>
       <details id="score-panel" style="margin-top:16px"><summary>Score Results</summary><div id="score-results" class="job-artifacts">Select a task to load its score.</div></details>
     </section>
   </main>
@@ -1065,7 +1065,6 @@ INDEX_HTML = r"""<!doctype html>
         <div class="job-actions">
           ${job.status === 'running' || job.status === 'starting' || job.status === 'queued' ? `<button class="stop" data-stop="${esc(job.id)}">停止</button>` : ''}
           <a class="button secondary" href="/api/simulations/${encodeURIComponent(job.id)}/export">匯出日誌與 ROS bag</a>
-          <a class="button secondary" href="/api/simulations/${encodeURIComponent(job.id)}/test-log.txt">下載測試日誌（TXT）</a>
           ${['completed','failed','stopped'].includes(job.status) ? `<button class="stop" data-delete-task="${esc(job.id)}">刪除任務</button>` : ''}
         </div></article>`).join('');
       list.querySelectorAll('[data-select]').forEach(card => {
@@ -1092,12 +1091,15 @@ INDEX_HTML = r"""<!doctype html>
           document.getElementById('selected-name').textContent = '選擇一個模擬工作';
           document.getElementById('viewer').innerHTML = '<div class="empty-view">目前沒有選取執行中的模擬</div>';
           document.getElementById('logs').textContent = '選擇工作後自動載入。';
+          document.getElementById('logs-panel').hidden = true;
+          document.getElementById('test-log-download').hidden = true;
           document.getElementById('score-results').textContent = 'Select a task to load its score.';
           selectedStatus = null;
         } else if (current.status !== selectedStatus) {
           selectedStatus = current.status;
           showView(current);
-          document.getElementById('logs-panel').hidden = ['completed','failed','stopped'].includes(current.status);
+          document.getElementById('logs-panel').hidden = false;
+          loadJobLogs(current);
           loadJobScore(current);
         } else if (current.status === 'running' && !document.querySelector('#viewer iframe')) {
           showView(current);
@@ -1134,17 +1136,23 @@ INDEX_HTML = r"""<!doctype html>
     if (changed || !document.querySelector('#viewer iframe')) showView(job);
     document.getElementById('logs-panel').open = true;
     document.getElementById('score-panel').open = true;
-    const terminal = ['completed','failed','stopped'].includes(job.status);
-    document.getElementById('logs-panel').hidden = terminal;
-    if (!terminal) {
-      const logs = document.getElementById('logs');
-      logs.textContent = '載入日誌中…';
-      try {
-        const response = await fetch(`/api/simulations/${encodeURIComponent(job.id)}/logs`);
-        logs.textContent = await response.text();
-      } catch (error) { logs.textContent = `無法載入日誌：${error}`; }
-    }
+    document.getElementById('logs-panel').hidden = false;
+    const download = document.getElementById('test-log-download');
+    download.href = `/api/simulations/${encodeURIComponent(job.id)}/test-log.txt`;
+    download.hidden = false;
+    await loadJobLogs(job);
     await loadJobScore(job);
+  }
+  async function loadJobLogs(job) {
+    const logs = document.getElementById('logs');
+    const download = document.getElementById('test-log-download');
+    download.href = `/api/simulations/${encodeURIComponent(job.id)}/test-log.txt`;
+    download.hidden = false;
+    logs.textContent = '載入日誌中…';
+    try {
+      const response = await fetch(`/api/simulations/${encodeURIComponent(job.id)}/logs`);
+      logs.textContent = await response.text();
+    } catch (error) { logs.textContent = `無法載入日誌：${error}`; }
   }
   async function loadJobScore(job) {
     const scoreNode = document.getElementById('score-results');
